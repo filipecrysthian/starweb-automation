@@ -1,0 +1,27 @@
+# Ambiente virtual
+.venv/
+venv/
+
+# Cache Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Credenciais e variáveis de ambiente
+.env
+
+# ChromeDriver (baixado automaticamente pelo webdriver-manager)
+driver/
+
+# Logs
+*.log
+
+# Arquivos do sistema
+Thumbs.db
+.DS_Store
