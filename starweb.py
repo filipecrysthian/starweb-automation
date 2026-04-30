@@ -2,16 +2,19 @@
 Módulo principal de automação do StarWeb.
 
 Automatiza o cadastro de Part Numbers no sistema StarWeb,
-copiando comandos e parâmetros de um PN base para um novo PN.
+copiando comandos e parâmetros de um PN base para novos PNs.
 
-Consolidação das versões v1 e v2, com melhorias de:
-- Esperas explícitas (WebDriverWait) em vez de sleep fixo
-- Tratamento de erros com cleanup do navegador
-- Logging estruturado
-- Selenium Manager nativo para gestão automática do chromedriver
-- Driver inicializado no __init__ (não como atributo de classe)
+Melhorias implementadas:
+- Mapeamento de comandos por nome/descrição (sem lista hardcoded)
+- Extração de texto imediata (evita StaleElementReference)
+- Cadastro em lote (múltiplos PNs)
+- Retry automático para elementos stale
+- Modo headless (--headless)
+- Configuração via config.ini
+- Notificação sonora ao finalizar
 """
 
+from functools import wraps
 from time import sleep
 
 from selenium import webdriver
@@ -21,44 +24,16 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from pandas import DataFrame
+from selenium.common.exceptions import StaleElementReferenceException
 
-from partnumber import PartNumber
 from credenciais import USERNAME, SENHA
 from mensagem import logger
-
-
-# Lista de todos os comandos disponíveis no StarWeb, na ordem em que
-# aparecem na tabela do modal de associação. Essa ordem é usada para
-# mapear cada comando ao seu índice (linha) na tabela.
-#
-# NOTA: Existem duplicatas intencionais (cmdFIM 3x, cmdOWMEM 2x,
-# cmdTeste3 2x) que refletem a estrutura real da tabela no sistema.
-# O método list.index() retorna SEMPRE o primeiro índice encontrado,
-# o que pode causar problemas se o PN base contiver um dos comandos
-# duplicados. TODO: investigar se o sistema realmente usa duplicatas.
-ALL_COMMANDS = [
-    "cmdASK", "cmdBAT", "cmdBIO", "cmdBLG", "cmdBTH", "cmdBTM", "cmdBTW",
-    "cmdCAM", "cmdCAR", "cmdCMI", "cmdCMOS", "cmdDLY", "cmdDMY", "cmdEAB",
-    "cmdFAN", "cmdFID", "cmdFIM", "cmdFIM", "cmdFIM", "cmdFLASHMAC",
-    "cmdLAE", "cmdLAN", "cmdLAX", "cmdLDX", "cmdLED", "cmdLID", "cmdLME",
-    "cmdLPB", "cmdMAC", "cmdMC2", "cmdMC3", "cmdMEM", "cmdMGG", "cmdMIC",
-    "cmdMSG", "cmdMVM", "cmdOWBIOS", "cmdOWMAC2", "cmdOWMAC4", "cmdOWMEM",
-    "cmdOWMEM", "cmdOWUSB", "cmdPCI", "cmdPRC", "cmdREDE", "cmdROT",
-    "cmdRPM", "cmdRW1", "cmdRW3", "cmdSATA", "cmdSIM", "cmdSMD", "cmdSND",
-    "cmdSNV", "cmdSVI", "cmdSXP", "cmdTBL", "cmdTBM", "cmdTBS", "cmdTBT",
-    "cmdTEC", "cmdTERMAL", "cmdTeste", "cmdTeste1", "cmdTeste2", "cmdTeste3",
-    "cmdTeste3", "cmdTeste5", "cmdTFX", "cmdTKB", "cmdTMI", "cmdTPD",
-    "cmdTSR", "cmdTTP", "cmdTWL", "cmdTXI", "cmdU2X", "cmdU3X", "cmdUCT",
-    "cmdUID", "cmdUII", "cmdUIW", "cmdUSB", "cmdUST", "cmdUSW", "cmdVGA",
-    "cmdVID", "cmdWAN", "cmdWAV", "cmdWIT", "cmdX1", "cmdX16", "cmdYOG",
-]
-
-# Timeout padrão para esperas explícitas (em segundos)
-DEFAULT_TIMEOUT = 30
-
-# Número máximo de tentativas para inserir o PN cadastrar
-MAX_RETRIES_PN = 3
+from config import (
+    STARWEB_URL, STARWEB_SCRIPTS_URL,
+    DEFAULT_TIMEOUT, MAX_RETRIES_PN,
+    WAIT_AFTER_LOGIN, WAIT_AFTER_NAVIGATE, WAIT_AFTER_PN_INPUT,
+    HEADLESS_DEFAULT,
+)
 
 # XPaths utilizados
 XPATH_LOGIN_USER = '//*[@id="login-username"]'
@@ -66,13 +41,32 @@ XPATH_LOGIN_PASS = '//*[@id="login-password"]'
 XPATH_LOGIN_BTN = '//*[@id="login-form"]/button'
 XPATH_PN_INPUT = '//*[@id="cmpn_part_number"]'
 XPATH_BTN_ASSOCIAR = '//*[@id="btn-associar-cmd"]'
+XPATH_MODAL = '//*[@id="exampleModal"]'
 XPATH_MODAL_BODY = '//*[@id="exampleModal"]/div/div/div[2]'
-XPATH_MODAL_CMD_INPUT = '//*[@id="exampleModal"]/div/div/div[2]/form/div/div/input'
 XPATH_TABLE_ROWS = '//*[@id="div-table-cmds"]/section/table/tbody/tr'
-XPATH_LOADING_OVERLAY = "loading-overlay"
+XPATH_MODAL_TABLE = '//table[contains(@class,"lista-comandos")]'
+XPATH_MODAL_CLOSE = '//*[@id="exampleModal"]/div/div/div[3]/button[@data-dismiss="modal"]'
+XPATH_BTN_ENVIAR_CQ = '//*[@id="button-send-cq"]//button'
 
-STARWEB_URL = "http://147.1.0.41/star/acesso"
-STARWEB_SCRIPTS_URL = "http://147.1.0.41/star/cmdpartnumber"
+
+def retry_on_stale(max_retries=3, delay=1):
+    """Decorator que retenta a função se ocorrer StaleElementReferenceException."""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except StaleElementReferenceException:
+                    if attempt == max_retries - 1:
+                        raise
+                    logger.debug(
+                        f"Elemento stale em {func.__name__}, "
+                        f"tentativa {attempt + 1}/{max_retries}"
+                    )
+                    sleep(delay)
+        return wrapper
+    return decorator
 
 
 class StarWeb:
@@ -83,16 +77,25 @@ class StarWeb:
         1. Abre o Chrome e acessa o StarWeb
         2. Faz login
         3. Navega para a aba de scripts
-        4. Insere o PN base e extrai comandos/parâmetros
-        5. Insere o PN a cadastrar e replica os comandos
+        4. Insere o PN base e extrai comandos/parâmetros/descrições
+        5. Para cada PN a cadastrar:
+           a. Insere o PN e verifica se já está cadastrado
+           b. Se não cadastrado, associa os comandos do PN base
+        6. Exibe resumo e notifica com som
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        pn_base: str,
+        pn_cadastrar_list: list,
+        headless: bool = False,
+    ) -> None:
+        self.pn_base = pn_base
+        self.pn_cadastrar_list = pn_cadastrar_list
+        self.headless = headless or HEADLESS_DEFAULT
         self.driver = None
         self.wait = None
-        self.lista_comandos = []
-        self.lista_parametros = []
-        self.df = None
+        self.dados_base = []  # Lista de dicts: [{comando, descricao, parametro}]
 
         try:
             self._inicializar_driver()
@@ -107,8 +110,13 @@ class StarWeb:
         """Inicializa o Chrome WebDriver com detecção automática do chromedriver."""
         logger.info("Inicializando navegador Chrome")
         options = Options()
-        # Desabilitar logs excessivos do Chrome
         options.add_experimental_option("excludeSwitches", ["enable-logging"])
+
+        if self.headless:
+            options.add_argument("--headless=new")
+            options.add_argument("--disable-gpu")
+            options.add_argument("--window-size=1920,1080")
+            logger.info("Modo headless ativado")
 
         # Selenium 4.6+ detecta a versão do Chrome e baixa
         # o chromedriver compatível automaticamente (Selenium Manager)
@@ -122,25 +130,40 @@ class StarWeb:
         self._acessar_starweb()
         self._login()
         self._acessar_guia_script()
-        self._inserir_pn_base()
+
+        # Extrair dados do PN base
+        self._inserir_pn(self.pn_base)
         self._aguardar_carregamento_tabela()
         self._extrair_dados()
-        self.df = DataFrame(self._tratar_dados())
-        logger.info(f"Extraídos {len(self.df)} comandos do PN base")
-        self._inserir_pn_cadastrar()
-        self._verificar_pn_cadastrar()
-        self._digitar_comandos()
-        logger.info("Tarefa concluída com sucesso!")
+        logger.info(f"Extraídos {len(self.dados_base)} comandos do PN base")
+
+        # Cadastrar cada PN
+        resultados = {"sucesso": [], "pulado": [], "falha": []}
+
+        for pn in self.pn_cadastrar_list:
+            try:
+                self._cadastrar_pn(pn)
+                resultados["sucesso"].append(pn)
+            except RuntimeError as e:
+                logger.warning(str(e))
+                resultados["pulado"].append(pn)
+            except Exception as e:
+                logger.error(f"Erro ao cadastrar PN {pn}: {e}")
+                resultados["falha"].append(pn)
+
+        self._exibir_resumo(resultados)
+        self._notificar_conclusao(resultados)
+
+    # ── Navegação e Login ──────────────────────────────────────────
 
     def _acessar_starweb(self) -> None:
         """Navega até a página de login do StarWeb."""
         logger.info("Acessando StarWeb")
         self.driver.get(STARWEB_URL)
 
-        # Se houver overlay/spinner de carregamento, espera sumir
         try:
             self.wait.until(
-                EC.invisibility_of_element_located((By.ID, XPATH_LOADING_OVERLAY))
+                EC.invisibility_of_element_located((By.ID, "loading-overlay"))
             )
         except Exception:
             logger.debug("Nenhum overlay de carregamento detectado")
@@ -164,33 +187,37 @@ class StarWeb:
         )
         botao_login.click()
 
-        # Aguarda o login ser processado e a página redirecionar
-        sleep(5)
+        sleep(WAIT_AFTER_LOGIN)
         logger.info("Login realizado com sucesso")
 
     def _acessar_guia_script(self) -> None:
         """Navega diretamente para a página de Scripts via URL."""
         logger.info("Acessando página de Scripts")
         self.driver.get(STARWEB_SCRIPTS_URL)
-        sleep(3)
+        sleep(WAIT_AFTER_NAVIGATE)
 
-        # Aguarda o campo de Part Number estar visível (página carregada)
         self.wait.until(
             EC.visibility_of_element_located((By.XPATH, XPATH_PN_INPUT))
         )
         logger.debug("Página de Scripts carregada")
 
-    def _inserir_pn_base(self) -> None:
-        """Insere o Part Number base para extração dos comandos."""
-        partnumber = PartNumber()
-        pn_base = partnumber.pn_base()
-        logger.info(f"Inserindo PN base: {pn_base}")
+    # ── Inserção de Part Number ────────────────────────────────────
 
+    def _inserir_pn(self, pn: str) -> None:
+        """Insere um Part Number no campo de entrada."""
+        logger.info(f"Inserindo PN: {pn}")
         campo = self.wait.until(
             EC.visibility_of_element_located((By.XPATH, XPATH_PN_INPUT))
         )
+        self._limpar_campo(campo)
         campo.clear()
-        campo.send_keys(pn_base)
+        campo.send_keys(pn)
+
+    def _limpar_campo(self, campo) -> None:
+        """Limpa o conteúdo de um campo de input via ActionChains."""
+        actions = ActionChains(self.driver)
+        actions.double_click(campo).perform()
+        actions.key_down(Keys.BACKSPACE).perform()
 
     def _aguardar_carregamento_tabela(self) -> None:
         """Aguarda a tabela de comandos carregar após inserir o PN."""
@@ -200,59 +227,82 @@ class StarWeb:
         )
         logger.debug("Tabela de comandos carregada")
 
-    def _inserir_pn_cadastrar(self) -> None:
-        """Insere o Part Number a ser cadastrado."""
-        partnumber = PartNumber()
-        pn_cadastrar = partnumber.pn_cadastrar()
-        logger.info(f"Inserindo PN para cadastro: {pn_cadastrar}")
+    # ── Extração de Dados do PN Base ───────────────────────────────
 
-        campo = self.wait.until(
-            EC.visibility_of_element_located((By.XPATH, XPATH_PN_INPUT))
-        )
-        self._limpar_campo(campo)
-        campo.clear()
-        campo.send_keys(pn_cadastrar)
+    @retry_on_stale(max_retries=3)
+    def _extrair_dados(self) -> None:
+        """Extrai comandos, descrições e parâmetros da tabela do PN base.
 
-    def _verificar_pn_cadastrar(self) -> None:
+        Salva os textos imediatamente (não WebElements) para evitar
+        StaleElementReferenceException caso a página atualize.
         """
-        Verifica se o PN cadastrar já existe no sistema.
+        logger.info("Extraindo dados do PN base")
+        self.dados_base = []
 
-        Detecta as mensagens:
-        - 'PART NUMBER não Encontrado' — PN não existe, precisa registrar
-        - 'PART NUMBER INVÁLIDO' — sistema ainda processando ou PN inválido
+        linhas = self.driver.find_elements(By.XPATH, XPATH_TABLE_ROWS)
+        for i in range(1, len(linhas) + 1):
+            cmd = self.driver.find_element(
+                By.XPATH, f'{XPATH_TABLE_ROWS}[{i}]/td[2]'
+            ).text.strip()
 
-        Se o PN já existir E já tiver comandos associados, aborta a execução
-        para evitar cadastro duplicado.
+            desc = self.driver.find_element(
+                By.XPATH, f'{XPATH_TABLE_ROWS}[{i}]/td[3]'
+            ).text.strip()
+
+            param = self.driver.find_element(
+                By.XPATH, f'{XPATH_TABLE_ROWS}[{i}]/td[4]/span'
+            ).text.strip()
+
+            self.dados_base.append({
+                "comando": cmd,
+                "descricao": desc,
+                "parametro": param,
+            })
+
+        logger.debug(
+            f"Comandos extraídos: "
+            f"{[d['comando'] for d in self.dados_base]}"
+        )
+
+    # ── Cadastro de PN ─────────────────────────────────────────────
+
+    def _cadastrar_pn(self, pn: str) -> None:
+        """Cadastra um único Part Number."""
+        logger.info(f"═══ Processando PN: {pn} ═══")
+        self._inserir_pn(pn)
+        self._verificar_pn(pn)
+        self._digitar_comandos()
+        self._enviar_para_aprovacao_cq(pn)
+        logger.info(f"PN {pn} cadastrado e enviado para aprovação CQ!")
+
+    def _verificar_pn(self, pn: str) -> None:
+        """
+        Verifica se o PN já existe e se já possui comandos.
+
+        - 'PART NUMBER não Encontrado' → habilita botão para cadastro
+        - 'PART NUMBER INVÁLIDO' → retry (pode ser timing do sistema)
+        - PN com comandos existentes → RuntimeError (aborta este PN)
         """
         for tentativa in range(1, MAX_RETRIES_PN + 1):
-            # Aguarda a resposta AJAX da página após inserir o PN
-            sleep(5)
+            sleep(WAIT_AFTER_PN_INPUT)
 
             try:
                 div_cmds = self.driver.find_element(By.ID, "div-table-cmds")
                 texto = div_cmds.text
             except Exception:
-                logger.debug("div-table-cmds não encontrado, assumindo PN existente")
+                logger.debug("div-table-cmds não encontrado")
                 return
 
             texto_lower = texto.lower()
-            pn_nao_encontrado = "não encontrado" in texto_lower
-            pn_invalido = "inválido" in texto_lower
 
-            if pn_invalido:
+            # PN INVÁLIDO — retry (pode ser problema de timing)
+            if "inválido" in texto_lower:
                 if tentativa < MAX_RETRIES_PN:
                     logger.warning(
                         f"PART NUMBER INVÁLIDO (tentativa {tentativa}/{MAX_RETRIES_PN}). "
-                        "Re-inserindo PN..."
+                        "Re-inserindo..."
                     )
-                    # Re-inserir o PN (pode ser problema de timing do sistema)
-                    campo = self.wait.until(
-                        EC.visibility_of_element_located((By.XPATH, XPATH_PN_INPUT))
-                    )
-                    self._limpar_campo(campo)
-                    campo.clear()
-                    partnumber = PartNumber()
-                    campo.send_keys(partnumber.pn_cadastrar())
+                    self._inserir_pn(pn)
                     continue
                 else:
                     logger.warning(
@@ -262,23 +312,25 @@ class StarWeb:
                     self._habilitar_botao_associar()
                     return
 
-            if pn_nao_encontrado:
+            # PN não encontrado — novo PN, habilitar cadastro
+            if "não encontrado" in texto_lower:
                 logger.warning(
-                    "PART NUMBER não encontrado no sistema. Registrando novo PN..."
+                    f"PN {pn} não encontrado no sistema. Registrando novo PN..."
                 )
                 self._habilitar_botao_associar()
                 return
 
-            # PN encontrado — verificar se já tem comandos associados
-            cmds_existentes = self.driver.find_elements(By.XPATH, XPATH_TABLE_ROWS)
+            # PN encontrado — verificar se já tem comandos
+            cmds_existentes = self.driver.find_elements(
+                By.XPATH, XPATH_TABLE_ROWS
+            )
             if cmds_existentes:
-                pn = PartNumber().pn_cadastrar()
                 raise RuntimeError(
-                    f"PART NUMBER {pn} já possui {len(cmds_existentes)} comando(s) "
-                    "cadastrado(s). Abortando para evitar duplicação."
+                    f"PN {pn} já possui {len(cmds_existentes)} comando(s) "
+                    "cadastrado(s). Pulando para evitar duplicação."
                 )
 
-            logger.info("PART NUMBER encontrado no sistema (sem comandos)")
+            logger.info(f"PN {pn} encontrado no sistema (sem comandos)")
             return
 
     def _habilitar_botao_associar(self) -> None:
@@ -287,86 +339,90 @@ class StarWeb:
             'document.getElementById("btn-associar-cmd")'
             '.removeAttribute("disabled");'
         )
-        logger.info("Botão 'Associar Comandos' habilitado para novo PN")
+        logger.info("Botão 'Associar Comandos' habilitado")
 
-    def _limpar_campo(self, campo) -> None:
-        """Limpa o conteúdo de um campo de input via ActionChains."""
-        actions = ActionChains(self.driver)
-        actions.double_click(campo).perform()
-        actions.key_down(Keys.BACKSPACE).perform()
+    # ── Inserção de Comandos via Modal ─────────────────────────────
 
-    def _extrair_dados(self) -> None:
-        """Extrai comandos e parâmetros da tabela do PN base."""
-        logger.info("Extraindo dados do PN base")
-        self._extrair_comandos()
-        self._extrair_parametros()
-
-    def _extrair_comandos(self) -> None:
-        """Extrai os nomes dos comandos da tabela."""
-        linhas = self.driver.find_elements(By.XPATH, XPATH_TABLE_ROWS)
-        for i in range(1, len(linhas) + 1):
-            elemento = self.driver.find_element(
-                By.XPATH, f'{XPATH_TABLE_ROWS}[{i}]/td[2]'
-            )
-            self.lista_comandos.append(elemento)
-
-    def _extrair_parametros(self) -> None:
-        """Extrai os parâmetros dos comandos da tabela."""
-        linhas = self.driver.find_elements(By.XPATH, XPATH_TABLE_ROWS)
-        for i in range(1, len(linhas) + 1):
-            elemento = self.driver.find_element(
-                By.XPATH, f'{XPATH_TABLE_ROWS}[{i}]/td[4]/span'
-            )
-            self.lista_parametros.append(elemento)
-
-    def _tratar_dados(self) -> dict:
-        """Converte os WebElements extraídos em um dicionário de dados."""
-        return {
-            "comando": [cmd.text for cmd in self.lista_comandos],
-            "parametro": [param.text for param in self.lista_parametros],
-        }
-
+    @retry_on_stale(max_retries=3)
     def _digitar_comandos(self) -> None:
-        """Associa os comandos extraídos ao novo PN via modal."""
+        """Associa os comandos extraídos ao PN via modal."""
         logger.info("Inserindo comandos no novo PN")
         self._abrir_modal_associar()
 
-        for i in range(len(self.df)):
-            cmd = self.df.loc[i, "comando"]
-            param = self.df.loc[i, "parametro"]
-            logger.debug(f"Processando comando {i + 1}/{len(self.df)}: {cmd}")
+        for idx, dados in enumerate(self.dados_base, 1):
+            cmd = dados["comando"]
+            desc = dados["descricao"]
+            param = dados["parametro"]
+            logger.debug(f"Processando comando {idx}/{len(self.dados_base)}: {cmd}")
 
-            # Digitar o nome do comando no campo de busca
-            input_cmd = self.wait.until(
-                EC.visibility_of_element_located((By.XPATH, XPATH_MODAL_CMD_INPUT))
-            )
-            input_cmd.clear()
-            input_cmd.send_keys(cmd)
+            # Encontrar a linha do comando no modal por nome (e descrição se duplicado)
+            target_row = self._encontrar_comando_no_modal(cmd, desc)
+            if not target_row:
+                logger.warning(f"Comando '{cmd}' não encontrado no modal. Pulando.")
+                continue
 
-            # Encontrar o índice do comando na tabela do modal
-            indice_cmd = ALL_COMMANDS.index(cmd) + 1
-
-            # Se tem parâmetro, preenchê-lo
+            # Preencher parâmetro se necessário
             if param:
-                xpath_param = (
-                    f'{XPATH_MODAL_BODY}/table/tbody/tr[{indice_cmd}]/td[3]/input'
-                )
-                input_param = self.wait.until(
-                    EC.visibility_of_element_located((By.XPATH, xpath_param))
-                )
-                input_param.clear()
-                input_param.send_keys(param)
+                try:
+                    param_input = target_row.find_element(
+                        By.XPATH, 'td[3]/input'
+                    )
+                    if param_input.is_enabled():
+                        param_input.clear()
+                        param_input.send_keys(param)
+                except Exception:
+                    logger.debug(f"Campo de parâmetro não disponível para {cmd}")
 
-            # Clicar no botão de adicionar
-            xpath_btn = (
-                f'{XPATH_MODAL_BODY}/table/tbody/tr[{indice_cmd}]/td[4]/button'
+            # Clicar no botão de adicionar (+)
+            btn_add = target_row.find_element(By.XPATH, 'td[4]/button')
+            self.driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center'});", btn_add
             )
-            btn_add = self.wait.until(
-                EC.element_to_be_clickable((By.XPATH, xpath_btn))
-            )
+            sleep(0.5)
             btn_add.click()
+            sleep(1)
 
         logger.info("Todos os comandos inseridos com sucesso")
+        self._fechar_modal()
+
+    def _encontrar_comando_no_modal(self, cmd: str, desc: str):
+        """
+        Encontra a linha do comando no modal por nome e descrição.
+
+        Usa XPath direto na tabela do modal em vez de lista hardcoded.
+        Para comandos duplicados (ex: cmdFIM), usa a descrição para
+        desambiguação.
+
+        Returns:
+            WebElement da linha (tr) ou None se não encontrado.
+        """
+        # Buscar todas as linhas com o nome do comando
+        xpath = (
+            f'{XPATH_MODAL_TABLE}//tbody/tr'
+            f'[td[1][normalize-space()="{cmd}"]]'
+        )
+        rows = self.driver.find_elements(By.XPATH, xpath)
+
+        if not rows:
+            return None
+
+        if len(rows) == 1:
+            return rows[0]
+
+        # Múltiplas linhas — desambiguar pela descrição
+        for row in rows:
+            try:
+                row_desc = row.find_element(By.XPATH, 'td[2]').text.strip()
+                if row_desc == desc:
+                    return row
+            except Exception:
+                continue
+
+        # Fallback: retornar a primeira linha
+        logger.warning(
+            f"Múltiplas versões de '{cmd}' encontradas, usando a primeira"
+        )
+        return rows[0]
 
     def _abrir_modal_associar(self) -> None:
         """Abre o modal de associação de comandos."""
@@ -375,11 +431,84 @@ class StarWeb:
         )
         botao.click()
 
-        # Espera modal abrir completamente
         self.wait.until(
             EC.visibility_of_element_located((By.XPATH, XPATH_MODAL_BODY))
         )
+        sleep(1)
         logger.debug("Modal de associação aberto")
+
+    def _fechar_modal(self) -> None:
+        """Fecha o modal de associação."""
+        try:
+            btn_close = self.driver.find_element(By.XPATH, XPATH_MODAL_CLOSE)
+            btn_close.click()
+            self.wait.until(
+                EC.invisibility_of_element_located((By.XPATH, XPATH_MODAL))
+            )
+            sleep(1)
+            logger.debug("Modal fechado")
+        except Exception:
+            logger.debug("Modal já estava fechado ou não encontrado")
+
+    def _enviar_para_aprovacao_cq(self, pn: str) -> None:
+        """Clica no botão 'Enviar para aprovação CQ' após associar comandos.
+
+        O botão é gerado dinamicamente pelo JavaScript da página
+        dentro da div#button-send-cq após os comandos serem associados.
+        """
+        logger.info(f"Enviando PN {pn} para aprovação CQ...")
+        try:
+            btn_cq = self.wait.until(
+                EC.element_to_be_clickable((By.XPATH, XPATH_BTN_ENVIAR_CQ))
+            )
+            self.driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center'});", btn_cq
+            )
+            sleep(1)
+            btn_cq.click()
+
+            # Aguarda o feedback de envio (barra de progresso)
+            sleep(3)
+            logger.info(f"PN {pn} enviado para aprovação CQ com sucesso!")
+        except Exception as e:
+            logger.warning(f"Não foi possível enviar para aprovação CQ: {e}")
+
+    def _exibir_resumo(self, resultados: dict) -> None:
+        """Exibe resumo do cadastro em lote."""
+        total = len(self.pn_cadastrar_list)
+        sucesso = len(resultados["sucesso"])
+        pulado = len(resultados["pulado"])
+        falha = len(resultados["falha"])
+
+        logger.info("═" * 50)
+        logger.info(f"RESUMO: {total} PN(s) processados")
+        logger.info(f"  ✅ Cadastrados: {sucesso}")
+        if pulado:
+            logger.info(f"  ⏭️  Pulados (já existem): {pulado}")
+        if falha:
+            logger.info(f"  ❌ Falhas: {falha}")
+
+        if resultados["sucesso"]:
+            logger.info(f"  PNs cadastrados: {', '.join(resultados['sucesso'])}")
+        if resultados["pulado"]:
+            logger.info(f"  PNs pulados: {', '.join(resultados['pulado'])}")
+        if resultados["falha"]:
+            logger.info(f"  PNs com falha: {', '.join(resultados['falha'])}")
+        logger.info("═" * 50)
+
+    @staticmethod
+    def _notificar_conclusao(resultados: dict) -> None:
+        """Emite notificação sonora ao finalizar."""
+        try:
+            import winsound
+            if resultados["falha"]:
+                # Bipe de erro
+                winsound.MessageBeep(winsound.MB_ICONHAND)
+            else:
+                # Bipe de sucesso
+                winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+        except ImportError:
+            pass  # winsound só existe no Windows
 
     def _fechar_navegador(self) -> None:
         """Fecha o navegador de forma segura."""

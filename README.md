@@ -1,24 +1,29 @@
 # StarWeb Automation 🤖
 
-Automação do cadastro de Part Numbers no sistema **StarWeb** via Selenium.
+Automação do cadastro de Part Numbers no sistema StarWeb usando Python + Selenium.
 
-## O que faz?
+## Funcionalidades
 
-Copia os comandos e parâmetros de um **Part Number base** (já cadastrado) para um **novo Part Number**, eliminando o trabalho manual de cadastro repetitivo.
-
-## Pré-requisitos
-
-- **Python 3.10+** instalado
-- **Google Chrome** instalado (o ChromeDriver é gerenciado automaticamente)
+- ✅ Login automático no StarWeb
+- ✅ Extração de comandos/parâmetros de um PN base
+- ✅ Cadastro em lote (múltiplos PNs de uma vez)
+- ✅ Validação: impede cadastro duplicado
+- ✅ Retry automático para "PART NUMBER INVÁLIDO"
+- ✅ Modo headless (sem abrir janela do Chrome)
+- ✅ Mapeamento inteligente de comandos (sem lista hardcoded)
+- ✅ Configuração via `config.ini`
+- ✅ Logging estruturado (console + arquivo `starweb.log`)
+- ✅ Notificação sonora ao finalizar
+- ✅ Credenciais seguras via `.env`
 
 ## Instalação
 
 ```bash
-# Clonar ou copiar o projeto
-git clone <url-do-repositorio>
+# Clonar repositório
+git clone https://github.com/filipecrysthian/starweb-automation.git
 cd starweb-automation
 
-# Criar ambiente virtual (recomendado)
+# Criar ambiente virtual
 python -m venv .venv
 .venv\Scripts\activate
 
@@ -28,63 +33,104 @@ pip install -r requirements.txt
 
 ## Configuração
 
-### 1. Credenciais
+### 1. Credenciais (`.env`)
 
-Crie um arquivo `.env` na raiz do projeto:
+Criar arquivo `.env` na raiz:
+
+```env
+STARWEB_USER=seu_usuario
+STARWEB_PASS=sua_senha
+```
+
+### 2. Part Numbers (`PN_cadastrar.txt`)
 
 ```ini
-STARWEB_USERNAME=seu_usuario
-STARWEB_SENHA=sua_senha
+PN_BASE: 1026300007
+PN_CADASTRAR: 1026300018
+PN_CADASTRAR: 1026300019
+PN_CADASTRAR: 1026300020
 ```
 
-> ⚠️ **Nunca versione o arquivo `.env`** — ele já está no `.gitignore`.
+### 3. Configurações opcionais (`config.ini`)
 
-### 2. Part Numbers
+```ini
+[starweb]
+url_login = http://147.1.0.41/star/acesso
+url_scripts = http://147.1.0.41/star/cmdpartnumber
+timeout = 30
+max_retries = 3
+wait_after_login = 5
+wait_after_navigate = 3
+wait_after_pn_input = 5
 
-Edite o arquivo `PN_cadastrar.txt`:
-
+[chrome]
+headless = false
 ```
-PN_BASE: 1026500002
-PN_CADASTRAR: 1026500004
-```
-
-- **PN_BASE**: Part Number existente cujos comandos serão copiados.
-- **PN_CADASTRAR**: Novo Part Number que receberá os comandos.
 
 ## Uso
 
-```bash
-# Via Python
-python main.py
+### Via arquivo (modo padrão)
 
-# Ou via batch file
-main.bat
+```bash
+python main.py
 ```
 
-O script irá:
-1. ✅ Abrir o Chrome e acessar o StarWeb
-2. ✅ Fazer login automaticamente
-3. ✅ Carregar os comandos do PN base
-4. ✅ Cadastrar os comandos no novo PN
-5. ✅ Fechar o navegador ao finalizar
+### Via linha de comando (CLI)
+
+```bash
+# Um PN
+python main.py --base 1026300007 --cadastrar 1026300018
+
+# Múltiplos PNs
+python main.py --base 1026300007 --cadastrar 1026300018 1026300019 1026300020
+
+# Modo headless (sem janela)
+python main.py --headless
+
+# Combinado
+python main.py --base 1026300007 --cadastrar 1026300018 --headless
+```
+
+### Via batch file
+
+```bash
+main.bat
+```
 
 ## Estrutura do Projeto
 
 ```
 starweb-automation/
-├── main.py           # Ponto de entrada
-├── main.bat          # Atalho para execução via terminal
-├── starweb.py        # Classe de automação (Selenium)
-├── partnumber.py     # Leitura dos Part Numbers do arquivo .txt
-├── credenciais.py    # Carrega credenciais do .env
-├── mensagem.py       # Logging colorido (console + arquivo)
-├── gerardortxt.py    # Gerador de arquivos de texto
-├── PN_cadastrar.txt  # Arquivo de entrada (PN base e PN cadastrar)
-├── requirements.txt  # Dependências Python
-├── .env              # Credenciais (NÃO versionar)
-└── .gitignore        # Arquivos ignorados pelo Git
+├── config.ini          # Configurações (URLs, timeouts)
+├── config.py           # Leitor de configurações
+├── credenciais.py      # Carrega credenciais do .env
+├── gerardortxt.py      # Gerador de arquivos txt
+├── main.bat            # Script de execução Windows
+├── main.py             # Ponto de entrada + CLI (argparse)
+├── mensagem.py         # Logger centralizado
+├── partnumber.py       # Parser de Part Numbers (lote)
+├── starweb.py          # Automação principal
+├── PN_cadastrar.txt    # Arquivo de entrada (PNs)
+├── requirements.txt    # Dependências Python
+├── .env                # Credenciais (não versionado)
+├── .gitignore          # Arquivos ignorados pelo git
+└── README.md           # Documentação
 ```
 
 ## Logs
 
-Os logs são salvos automaticamente em `starweb.log` com timestamps detalhados, útil para investigar falhas.
+A execução gera `starweb.log` com detalhes completos. Verifique em caso de falhas.
+
+## Resumo da Execução
+
+Ao finalizar, o script exibe um resumo:
+
+```
+══════════════════════════════════════════════════
+RESUMO: 3 PN(s) processados
+  ✅ Cadastrados: 2
+  ⏭️  Pulados (já existem): 1
+  PNs cadastrados: 1026300018, 1026300020
+  PNs pulados: 1026300019
+══════════════════════════════════════════════════
+```
