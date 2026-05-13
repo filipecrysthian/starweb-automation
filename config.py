@@ -22,6 +22,8 @@ MAX_RETRIES_PN = _config.getint("starweb", "max_retries", fallback=3)
 WAIT_AFTER_LOGIN = _config.getint("starweb", "wait_after_login", fallback=5)
 WAIT_AFTER_NAVIGATE = _config.getint("starweb", "wait_after_navigate", fallback=3)
 WAIT_AFTER_PN_INPUT = _config.getint("starweb", "wait_after_pn_input", fallback=5)
+DELAY_BETWEEN_COMMANDS = _config.getfloat("starweb", "delay_between_commands", fallback=1.0)
+DELAY_AFTER_CQ = _config.getfloat("starweb", "delay_after_cq", fallback=3.0)
 
 # Chrome
 HEADLESS_DEFAULT = _config.getboolean("chrome", "headless", fallback=False)

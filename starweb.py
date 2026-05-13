@@ -32,6 +32,7 @@ from config import (
     STARWEB_URL, STARWEB_SCRIPTS_URL,
     DEFAULT_TIMEOUT, MAX_RETRIES_PN,
     WAIT_AFTER_LOGIN, WAIT_AFTER_NAVIGATE, WAIT_AFTER_PN_INPUT,
+    DELAY_BETWEEN_COMMANDS, DELAY_AFTER_CQ,
     HEADLESS_DEFAULT,
 )
 
@@ -211,7 +212,10 @@ class StarWeb:
         )
         self._limpar_campo(campo)
         campo.clear()
-        campo.send_keys(pn)
+        # Digita o PN com um pequeno delay entre caracteres para maior estabilidade
+        for char in pn:
+            campo.send_keys(char)
+            sleep(0.05)
 
     def _limpar_campo(self, campo) -> None:
         """Limpa o conteúdo de um campo de input via ActionChains."""
@@ -369,7 +373,9 @@ class StarWeb:
                     )
                     if param_input.is_enabled():
                         param_input.clear()
+                        sleep(0.5)  # Pequeno delay antes de inserir o parâmetro
                         param_input.send_keys(param)
+                        sleep(0.5)  # Pequeno delay após inserir o parâmetro
                 except Exception:
                     logger.debug(f"Campo de parâmetro não disponível para {cmd}")
 
@@ -380,7 +386,7 @@ class StarWeb:
             )
             sleep(0.5)
             btn_add.click()
-            sleep(1)
+            sleep(DELAY_BETWEEN_COMMANDS)
 
         logger.info("Todos os comandos inseridos com sucesso")
         self._fechar_modal()
@@ -468,7 +474,7 @@ class StarWeb:
             btn_cq.click()
 
             # Aguarda o feedback de envio (barra de progresso)
-            sleep(3)
+            sleep(DELAY_AFTER_CQ)
             logger.info(f"PN {pn} enviado para aprovação CQ com sucesso!")
         except Exception as e:
             logger.warning(f"Não foi possível enviar para aprovação CQ: {e}")
