@@ -15,6 +15,7 @@ Automação do cadastro de Part Numbers no sistema StarWeb usando Python + Selen
 - ✅ Logging estruturado (console + arquivo `starweb.log`)
 - ✅ Notificação sonora ao finalizar
 - ✅ Credenciais seguras via `.env`
+- ✅ Ajustes finos de performance para garantir estabilidade em sistemas lentos
 
 ## Instalação
 
@@ -62,10 +63,19 @@ max_retries = 3
 wait_after_login = 5
 wait_after_navigate = 3
 wait_after_pn_input = 5
+delay_between_commands = 4
+delay_after_cq = 5
 
 [chrome]
 headless = false
 ```
+
+### 4. Ajuste de Performance (Opcional)
+
+Se você notar que a automação está muito rápida e o StarWeb não está registrando alguns comandos, você pode ajustar a velocidade:
+1. Abra o arquivo `config.ini`.
+2. Aumente o valor de `delay_between_commands` (ex: de `4` para `5` ou `6`). Isso fará com que o robô aguarde mais tempo entre o envio de cada comando, dando tempo ao banco de dados do StarWeb de salvá-lo.
+3. Se quiser mais velocidade, você pode reduzir o valor aos poucos (ex: para `2` ou `3`), contanto que o sistema consiga acompanhar.
 
 ## Uso
 
